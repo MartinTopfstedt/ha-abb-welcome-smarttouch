@@ -28,6 +28,7 @@ from .const import (
     DEFAULT_LAN_RTSP_BIND_HOST,
     DEFAULT_LAN_RTSP_PORT,
     DEFAULT_LAN_RTSP_PORT_PICK_ATTEMPTS,
+    DATA_GATEWAY_DEVICES,
     DEFAULT_UNLOCK_STRATEGY,
     DOMAIN,
     EVENT_DISCOVERY_CHANGED,
@@ -640,16 +641,54 @@ def _parse_gateway_doors(raw: str, sip_domain: str) -> list[dict]:
     return doors
 
 
+_DEVICE_SLOT_RE = re.compile(r"^(.*?)_(\d+)$")
+# Kinds whose names may be people or app accounts rather than devices.
+_PERSONAL_DEVICE_KIND_RE = re.compile(r"user|app|client|account|phone", re.I)
+
+
+def _parse_gateway_devices(raw: str) -> list[dict]:
+    """Summarise every getdevicelist entry, not just outdoor stations.
+
+    Only outdoor stations become entities today; the rest is kept for
+    diagnostics so other device kinds (lights, actuators, ...) can be
+    identified before support for them is built.
+    """
+    devices: list[dict] = []
+    for item in filter(None, raw.split(";")):
+        parts = item.split("+")
+        key = parts[0].strip()
+        if not key:
+            continue
+        match = _DEVICE_SLOT_RE.match(key)
+        kind = match.group(1) if match else key
+        name = (
+            repair_utf8_mojibake(unquote(parts[2].strip())) if len(parts) > 2 else ""
+        )
+        if name and _PERSONAL_DEVICE_KIND_RE.search(kind):
+            name = "**REDACTED**"
+        devices.append(
+            {
+                "kind": kind,
+                "slot": int(match.group(2)) if match else None,
+                "id": parts[1].strip() if len(parts) > 1 else "",
+                "name": name,
+                "field_count": len(parts),
+            }
+        )
+    return devices
+
+
 def _fetch_doors_from_gateway(
     gateway_ip: str, admin_password: str, sip_domain: str
-) -> list[dict] | None:
-    """Pull the current outdoor-station list from the gateway admin CGI."""
+) -> tuple[list[dict] | None, list[dict]]:
+    """Pull the outdoor stations and a summary of all gateway devices."""
     try:
         raw = _fetch_gateway_device_list(gateway_ip, admin_password)
     except RuntimeError as err:
         _LOGGER.error("[abb] refresh_doors: gateway HTTP error: %s", err)
-        return None
+        return None, []
 
+    devices = _parse_gateway_devices(raw)
     doors = _parse_gateway_doors(raw, sip_domain)
     if not doors:
         _LOGGER.warning(
@@ -657,8 +696,8 @@ def _fetch_doors_from_gateway(
             "(raw=%r)",
             raw,
         )
-        return None
-    return doors
+        return None, devices
+    return doors, devices
 
 
 def _doors_equal(a: list[dict], b: list[dict]) -> bool:
@@ -714,12 +753,23 @@ async def _async_refresh_doors_for_entry(
         )
         return False
 
-    new_doors = await hass.async_add_executor_job(
+    new_doors, devices = await hass.async_add_executor_job(
         _fetch_doors_from_gateway,
         gateway_ip,
         admin_password,
         sip_domain,
     )
+    if devices:
+        # Kept outside the per-entry bucket, which setup recreates later.
+        hass.data.setdefault(DATA_GATEWAY_DEVICES, {})[entry.entry_id] = devices
+        kinds: dict[str, int] = {}
+        for device in devices:
+            kinds[device["kind"]] = kinds.get(device["kind"], 0) + 1
+        _LOGGER.info(
+            "[abb] gateway device list for entry %s: %s",
+            entry.entry_id,
+            ", ".join(f"{kind}={count}" for kind, count in sorted(kinds.items())),
+        )
     if new_doors is None:
         return False
 
@@ -1188,4 +1238,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
+        hass.data.get(DATA_GATEWAY_DEVICES, {}).pop(entry.entry_id, None)
     return unload_ok
