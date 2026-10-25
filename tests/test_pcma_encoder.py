@@ -200,6 +200,26 @@ def test_talk_sender_starts_muted_without_audio() -> None:
     assert all(len(packet) == 12 for packet in transport.sent)
 
 
+def test_feed_pcma_reframes_backchannel_chunks() -> None:
+    """go2rtc sends ~128 ms PCMA chunks; the station gets 20 ms frames."""
+
+    class FakeTransport:
+        def sendto(self, packet: bytes, dest: tuple[str, int]) -> None:
+            pass
+
+    sender = mp._PCMATalkSender(FakeTransport(), ("127.0.0.1", 9000))
+    assert sender.feed_pcma(b"\x01" * 1024) == 0  # muted: dropped
+    sender.start_talk()
+    chunk = bytes(range(256)) * 4
+    assert sender.feed_pcma(chunk) == 6  # 1024 // 160
+    assert sender.feed_pcma(chunk) == 6  # 64 leftover + 1024 = 1088 -> 6
+    frames = list(sender._queued_pcma)
+    assert all(len(frame) == 160 for frame in frames)
+    assert b"".join(frames) == (chunk + chunk)[: 12 * 160]
+    sender.stop_talk()
+    assert not sender._queued_pcma and not sender._pcma_buffer
+
+
 
 if __name__ == "__main__":
     test_table_matches_scalar_for_every_sample()
@@ -212,4 +232,5 @@ if __name__ == "__main__":
     test_missing_sdp_key_drops_encrypted_audio_not_plain_audio()
     test_talk_sender_starts_muted_without_audio()
     test_h264_sps_resolution()
+    test_feed_pcma_reframes_backchannel_chunks()
     print(f"OK  numpy_fast_path={'yes' if mp._ALAW_LUT is not None else 'no (fallback)'}")

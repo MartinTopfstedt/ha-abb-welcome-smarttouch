@@ -58,9 +58,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, GO2RTC_RTSP_HOST, GO2RTC_RTSP_PORT
 from .intercom_dialer import Door, IntercomDialer
-from .media_pipeline import StreamSession
+from .media_pipeline import StreamSession, _rtp_payload
 from .rtsp_server import (
     AUDIO_RTP_CHANNEL,
+    BACKCHANNEL_TRACK_ID,
     VIDEO_RTP_CHANNEL,
     RtspServer,
     RtspSession,
@@ -78,6 +79,9 @@ _LOGGER = logging.getLogger(__name__)
 _GO2RTC_DOMAIN = "go2rtc"
 _REQUEST_TIMEOUT = ClientTimeout(total=10)
 _TEARDOWN_GRACE_SECONDS = 2.0
+# Backchannel talkback ends this long after the last microphone packet.
+_BACKCHANNEL_IDLE_SECONDS = 1.0
+_PCMA_PAYLOAD_TYPE = 8
 
 
 def _safe_key(value: str) -> str:
@@ -354,6 +358,8 @@ class StationStreamCoordinator:
         self._rtsp_play_sessions: list[RtspSession] = []
         self._close_task: asyncio.Task | None = None
         self._talkback_owner = ""
+        self._backchannel_idle: asyncio.TimerHandle | None = None
+        self._backchannel_warned_pt: set[int] = set()
         self._state_callbacks: list[Callable[[], None]] = []
         self.session = StreamSession(
             dialer=dialer,
@@ -454,7 +460,64 @@ class StationStreamCoordinator:
         )
         return True
 
+    @staticmethod
+    def _backchannel_owner(sess: RtspSession) -> str:
+        return f"rtsp-backchannel:{sess.session_id}"
+
+    def handle_backchannel_rtp(self, sess: RtspSession, rtp: bytes) -> None:
+        """Forward go2rtc backchannel (browser microphone) RTP to the station.
+
+        Talkback starts with the first packet and stops once packets pause
+        for :data:`_BACKCHANNEL_IDLE_SECONDS` (microphone muted or closed).
+        A client already talking through the talk_* services keeps priority.
+        """
+        if len(rtp) < 12 or not self.session.talkback_ready:
+            return
+        pt = rtp[1] & 0x7F
+        if pt != _PCMA_PAYLOAD_TYPE:
+            if pt not in self._backchannel_warned_pt:
+                self._backchannel_warned_pt.add(pt)
+                _LOGGER.warning(
+                    "[abb] backchannel station=%s: ignoring RTP payload type %d, "
+                    "only PCMA (8) is supported",
+                    self.door.station_id or self.door.address,
+                    pt,
+                )
+            return
+        owner = self._backchannel_owner(sess)
+        if self._talkback_owner and self._talkback_owner != owner:
+            return
+        if self._talkback_owner != owner:
+            self.start_talkback(owner)
+            _LOGGER.info(
+                "[abb] backchannel talkback started station=%s session=%s",
+                self.door.station_id or self.door.address,
+                sess.session_id,
+            )
+        payload = _rtp_payload(rtp)
+        if payload:
+            self.session.feed_talkback_pcma(payload)
+        if self._backchannel_idle is not None:
+            self._backchannel_idle.cancel()
+        self._backchannel_idle = self.hass.loop.call_later(
+            _BACKCHANNEL_IDLE_SECONDS, self._end_backchannel_talk, owner
+        )
+
+    def _end_backchannel_talk(self, owner: str) -> None:
+        if self._talkback_owner != owner:
+            return
+        if self._backchannel_idle is not None:
+            self._backchannel_idle.cancel()
+            self._backchannel_idle = None
+        self.stop_talkback(owner)
+        _LOGGER.info(
+            "[abb] backchannel talkback stopped station=%s owner=%s",
+            self.door.station_id or self.door.address,
+            owner,
+        )
+
     def detach_rtsp_session(self, sess: RtspSession) -> None:
+        self._end_backchannel_talk(self._backchannel_owner(sess))
         self._discard_rtsp_play_session(sess)
         _LOGGER.info(
             "[abb] stream coordinator: detached RTSP session station=%s "
@@ -682,6 +745,7 @@ class ABBWelcomeCamera(Camera):
             on_describe=self._on_rtsp_describe,
             on_play=self._on_rtsp_play,
             on_teardown=self._on_rtsp_teardown,
+            on_backchannel=self._on_rtsp_backchannel,
         )
 
         # WebRTC session bookkeeping (one Go2RtcWsClient per HA frontend
@@ -957,7 +1021,7 @@ class ABBWelcomeCamera(Camera):
     # RTSP server callbacks                                              #
     # ------------------------------------------------------------------ #
 
-    async def _on_rtsp_describe(self) -> str | None:
+    async def _on_rtsp_describe(self, backchannel: bool = False) -> str | None:
         armed_state = get_state(self.hass, self._entry_id)
         _LOGGER.info(
             "[abb] camera %s: DESCRIBE armed=%s target_station=%s "
@@ -1012,13 +1076,23 @@ class ABBWelcomeCamera(Camera):
             "m=audio 0 RTP/AVP 8",
             "a=rtpmap:8 PCMA/8000",
             "a=control:trackID=1",
-            "",
         ]
+        if backchannel:
+            # ONVIF-style backchannel: go2rtc sends the browser microphone
+            # here as PCMA, which goes to the station's talkback leg as is.
+            sdp_lines += [
+                "m=audio 0 RTP/AVP 8",
+                "a=rtpmap:8 PCMA/8000",
+                f"a=control:trackID={BACKCHANNEL_TRACK_ID}",
+                "a=sendonly",
+            ]
+        sdp_lines.append("")
         _LOGGER.info(
             "[abb] camera %s: DESCRIBE returning SDP codec=%s fmtp=%s "
-            "camera_index=%s",
+            "camera_index=%s backchannel=%s",
             self._attr_name, codec, fmtp,
             self._camera_index if self._camera_index is not None else "default",
+            backchannel,
         )
         return "\r\n".join(sdp_lines) + "\r\n"
 
@@ -1053,6 +1127,9 @@ class ABBWelcomeCamera(Camera):
             self._coordinator.client_count,
         )
         self.async_write_ha_state()
+
+    def _on_rtsp_backchannel(self, sess: RtspSession, rtp: bytes) -> None:
+        self._coordinator.handle_backchannel_rtp(sess, rtp)
 
     async def _on_rtsp_teardown(self, sess: RtspSession) -> None:
         _LOGGER.info(

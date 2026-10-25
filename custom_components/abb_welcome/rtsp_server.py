@@ -25,6 +25,12 @@ Channel allocation:
 * video RTCP → channel 1
 * audio RTP  → channel 2
 * audio RTCP → channel 3
+
+Two-way audio uses the ONVIF backchannel convention go2rtc speaks: when
+DESCRIBE carries ``Require: www.onvif.org/ver20/backchannel`` the camera
+may add a ``sendonly`` audio track (``trackID=2``).  go2rtc SETUPs it on a
+channel of its choice and then sends the microphone RTP to us as
+interleaved frames on the same TCP connection.
 """
 
 from __future__ import annotations
@@ -43,6 +49,12 @@ VIDEO_RTP_CHANNEL: Final = 0
 VIDEO_RTCP_CHANNEL: Final = 1
 AUDIO_RTP_CHANNEL: Final = 2
 AUDIO_RTCP_CHANNEL: Final = 3
+
+VIDEO_TRACK_ID: Final = 0
+AUDIO_TRACK_ID: Final = 1
+BACKCHANNEL_TRACK_ID: Final = 2
+
+_BACKCHANNEL_REQUIRE = "www.onvif.org/ver20/backchannel"
 
 _USER_AGENT = "ABB-Welcome-HA-RTSP-Server/1.0"
 
@@ -64,6 +76,8 @@ class RtspSession:
     write_lock: asyncio.Lock
     has_video: bool = False
     has_audio: bool = False
+    # Interleaved RTP channel the client sends backchannel audio on.
+    backchannel_channel: int | None = None
     playing: bool = False
     overflow_drops: int = 0
 
@@ -113,14 +127,16 @@ class RtspServer:
         self,
         *,
         host: str,
-        on_describe: Callable[[], Awaitable[str | None]],
+        on_describe: Callable[[bool], Awaitable[str | None]],
         on_play: Callable[[RtspSession], Awaitable[None]],
         on_teardown: Callable[[RtspSession], Awaitable[None]],
+        on_backchannel: Callable[[RtspSession, bytes], None] | None = None,
     ) -> None:
         self._host = host
         self._on_describe = on_describe
         self._on_play = on_play
         self._on_teardown = on_teardown
+        self._on_backchannel = on_backchannel
         self._server: asyncio.base_events.Server | None = None
         self._port: int = 0
         self._next_session = 1
@@ -171,7 +187,29 @@ class RtspServer:
         session_id: str | None = None
         try:
             while True:
-                request = await self._read_request(reader)
+                first = await reader.readexactly(1)
+                if first == b"$":
+                    # Interleaved binary frame from the client: backchannel
+                    # RTP, or RTCP receiver reports we have no use for.
+                    channel, length = struct.unpack("!BH", await reader.readexactly(3))
+                    frame = await reader.readexactly(length)
+                    sess = self._sessions.get(session_id) if session_id else None
+                    if (
+                        sess is not None
+                        and sess.backchannel_channel == channel
+                        and self._on_backchannel is not None
+                    ):
+                        try:
+                            self._on_backchannel(sess, frame)
+                        except Exception as err:  # noqa: BLE001
+                            _LOGGER.debug("[abb-rtsp] on_backchannel raised: %s", err)
+                    continue
+                if first in (b"\r", b"\n"):
+                    # Stray line break between requests.
+                    if first == b"\r":
+                        await reader.readline()
+                    continue
+                request = await self._read_request(reader, first)
                 if request is None:
                     break
                 method, url, headers, body = request
@@ -189,7 +227,8 @@ class RtspServer:
                     continue
 
                 if method == "DESCRIBE":
-                    sdp = await self._on_describe()
+                    backchannel = _BACKCHANNEL_REQUIRE in headers.get("require", "")
+                    sdp = await self._on_describe(backchannel)
                     if sdp is None:
                         await self._send_response(
                             writer, write_lock, 503, "Service Unavailable",
@@ -233,7 +272,18 @@ class RtspServer:
                         self._sessions[session_id] = sess
                     else:
                         sess = self._sessions[session_id]
-                    if interleaved == (VIDEO_RTP_CHANNEL, VIDEO_RTCP_CHANNEL):
+                    track_id = self._parse_track_id(url)
+                    if track_id == BACKCHANNEL_TRACK_ID:
+                        # The client picks the channel; frames on it carry
+                        # microphone RTP for the door station.
+                        sess.backchannel_channel = (
+                            interleaved[0] if interleaved else None
+                        )
+                    elif track_id == VIDEO_TRACK_ID:
+                        sess.has_video = True
+                    elif track_id == AUDIO_TRACK_ID:
+                        sess.has_audio = True
+                    elif interleaved == (VIDEO_RTP_CHANNEL, VIDEO_RTCP_CHANNEL):
                         sess.has_video = True
                     elif interleaved == (AUDIO_RTP_CHANNEL, AUDIO_RTCP_CHANNEL):
                         sess.has_audio = True
@@ -260,9 +310,10 @@ class RtspServer:
                     )
                     _LOGGER.info(
                         "[abb-rtsp] SETUP peer=%s session=%s cseq=%s "
-                        "interleaved=%s has_video=%s has_audio=%s",
+                        "interleaved=%s has_video=%s has_audio=%s "
+                        "backchannel_channel=%s",
                         peer, session_id, cseq, interleaved,
-                        sess.has_video, sess.has_audio,
+                        sess.has_video, sess.has_audio, sess.backchannel_channel,
                     )
                     continue
 
@@ -340,10 +391,20 @@ class RtspServer:
         return int(m.group(1)), int(m.group(2))
 
     @staticmethod
+    def _parse_track_id(url: str) -> int | None:
+        m = re.search(r"trackID=(\d+)", url)
+        return int(m.group(1)) if m else None
+
+    @staticmethod
     async def _read_request(
         reader: asyncio.StreamReader,
+        first: bytes = b"",
     ) -> tuple[str, str, dict[str, str], bytes] | None:
         head = bytearray()
+        if first:
+            # The caller already consumed the first byte to rule out an
+            # interleaved frame; put it back in front of the request line.
+            head.extend(first + await reader.readline())
         while True:
             line = await reader.readline()
             if not line:
