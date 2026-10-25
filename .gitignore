@@ -16,3 +16,6 @@ st10_*.py
 *_private_key.pem
 *_certificate.pem
 *_credentials.json
+
+# Local builds
+dist/

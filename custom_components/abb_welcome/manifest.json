@@ -13,5 +13,5 @@
     "cryptography>=42.0.0",
     "requests>=2.32.0"
   ],
-  "version": "1.8.0"
+  "version": "1.8.5"
 }

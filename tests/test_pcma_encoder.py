@@ -149,6 +149,57 @@ def test_missing_sdp_key_drops_encrypted_audio_not_plain_audio() -> None:
     assert receiver.invalid_rtp_dropped == 1
 
 
+def test_h264_sps_resolution() -> None:
+    """SPS NALs produced by libx264 decode to the encoded frame size."""
+    cases = {
+        "6742c01ed900a03da1000003000100000300320f162e48": (66, 30, 640, 480),
+        "6742c01fd9005005ba1000000300100000030320f1832480": (66, 31, 1280, 720),
+        "67640028acd940780227e584000003000400000300c83c60c658": (100, 40, 1920, 1080),
+        "6742c00dd901609684000003000400000300c83c50a920": (66, 13, 352, 288),
+    }
+    for sps_hex, expected in cases.items():
+        sps = bytes.fromhex(sps_hex)
+        assert mp._parse_h264_sps(sps) == expected
+        assert mp._h264_sps_from_rtp_payload(sps) == sps
+        stap_a = bytes([24]) + struct.pack("!H", 2) + b"\x68\xce" + struct.pack(
+            "!H", len(sps)
+        ) + sps
+        assert mp._h264_sps_from_rtp_payload(stap_a) == sps
+    assert mp._parse_h264_sps(b"\x65\x88\x84\x00") is None
+
+
+def test_talk_sender_starts_muted_without_audio() -> None:
+    """Until talk_start, only empty RTP keepalives go to the station."""
+    import asyncio
+
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def sendto(self, packet: bytes, dest: tuple[str, int]) -> None:
+            self.sent.append(packet)
+
+    async def run() -> FakeTransport:
+        transport = FakeTransport()
+        sender = mp._PCMATalkSender(
+            transport, ("127.0.0.1", 9000), packet_rate=200
+        )
+        start_ts = sender.timestamp
+        await sender.start()
+        await asyncio.sleep(0.3)
+        await sender.stop()
+        assert not sender.talking
+        assert sender.voice_packets_sent == 0
+        assert sender.silence_packets_sent == 0
+        assert sender.keepalive_packets_sent >= 1
+        assert len(transport.sent) == sender.keepalive_packets_sent
+        assert sender.timestamp != start_ts
+        return transport
+
+    transport = asyncio.run(run())
+    assert all(len(packet) == 12 for packet in transport.sent)
+
+
 
 if __name__ == "__main__":
     test_table_matches_scalar_for_every_sample()
@@ -159,4 +210,6 @@ if __name__ == "__main__":
     test_abb_aes_rtp_talkback_matches_original_packet_shape()
     test_abb_aes_rtp_zero_padding_roundtrip()
     test_missing_sdp_key_drops_encrypted_audio_not_plain_audio()
+    test_talk_sender_starts_muted_without_audio()
+    test_h264_sps_resolution()
     print(f"OK  numpy_fast_path={'yes' if mp._ALAW_LUT is not None else 'no (fallback)'}")

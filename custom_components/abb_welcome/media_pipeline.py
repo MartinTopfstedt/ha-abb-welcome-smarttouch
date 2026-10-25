@@ -68,6 +68,106 @@ def _build_rtcp_pli(reporter: int, media: int) -> bytes:
     return struct.pack("!BBHII", 0x81, 206, 2, reporter, media)
 
 
+class _BitReader:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._pos = 0
+
+    def bit(self) -> int:
+        byte = self._data[self._pos >> 3]
+        value = (byte >> (7 - (self._pos & 7))) & 1
+        self._pos += 1
+        return value
+
+    def bits(self, n: int) -> int:
+        value = 0
+        for _ in range(n):
+            value = (value << 1) | self.bit()
+        return value
+
+    def ue(self) -> int:
+        zeros = 0
+        while self.bit() == 0:
+            zeros += 1
+            if zeros > 31:
+                raise ValueError("invalid exp-golomb code")
+        return (1 << zeros) - 1 + self.bits(zeros)
+
+    def se(self) -> int:
+        value = self.ue()
+        return (value + 1) // 2 if value & 1 else -(value // 2)
+
+
+def _parse_h264_sps(nal: bytes) -> tuple[int, int, int, int] | None:
+    """Return (profile_idc, level_idc, width, height) from an H.264 SPS NAL."""
+    if len(nal) < 4 or nal[0] & 0x1F != 7:
+        return None
+    rbsp = re.sub(b"\x00\x00\x03", b"\x00\x00", nal[1:])
+    try:
+        r = _BitReader(rbsp)
+        profile = r.bits(8)
+        r.bits(8)  # constraint flags
+        level = r.bits(8)
+        r.ue()  # seq_parameter_set_id
+        chroma_format = 1
+        if profile in (100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135):
+            chroma_format = r.ue()
+            if chroma_format == 3:
+                r.bit()
+            r.ue()
+            r.ue()
+            r.bit()
+            if r.bit():  # scaling matrices: not worth parsing for a log line
+                return None
+        r.ue()  # log2_max_frame_num_minus4
+        poc_type = r.ue()
+        if poc_type == 0:
+            r.ue()
+        elif poc_type == 1:
+            r.bit()
+            r.se()
+            r.se()
+            for _ in range(r.ue()):
+                r.se()
+        r.ue()  # max_num_ref_frames
+        r.bit()
+        width_mbs = r.ue() + 1
+        height_units = r.ue() + 1
+        frame_mbs_only = r.bit()
+        if not frame_mbs_only:
+            r.bit()
+        r.bit()
+        width = width_mbs * 16
+        height = (2 - frame_mbs_only) * height_units * 16
+        if r.bit():  # frame cropping
+            crop_x = 2 if chroma_format in (1, 2) else 1
+            crop_y = (2 if chroma_format == 1 else 1) * (2 - frame_mbs_only)
+            left, right, top, bottom = r.ue(), r.ue(), r.ue(), r.ue()
+            width -= (left + right) * crop_x
+            height -= (top + bottom) * crop_y
+    except (IndexError, ValueError):
+        return None
+    return profile, level, width, height
+
+
+def _h264_sps_from_rtp_payload(payload: bytes) -> bytes | None:
+    """Find an SPS NAL in a single-NAL or STAP-A H.264 RTP payload."""
+    if not payload:
+        return None
+    nal_type = payload[0] & 0x1F
+    if nal_type == 7:
+        return payload
+    if nal_type == 24:
+        pos = 1
+        while pos + 2 <= len(payload):
+            size = struct.unpack_from("!H", payload, pos)[0]
+            nal = payload[pos + 2:pos + 2 + size]
+            if nal and nal[0] & 0x1F == 7:
+                return nal
+            pos += 2 + size
+    return None
+
+
 def _build_rtcp_rr(reporter: int, source: int, last_seq: int) -> bytes:
     return struct.pack(
         "!BBH IIIIIII",
@@ -257,6 +357,7 @@ class _PCMATalkSender:
         self._encrypt_key = encrypt_key
         self.samples_per_packet = samples_per_packet
         self.interval = 1.0 / packet_rate
+        self.keepalive_ticks = max(1, int(packet_rate * _KEEPALIVE_INTERVAL))
         self.max_queue_frames = max_queue_frames
         self.ssrc = secrets.randbits(32)
         self.seq = secrets.randbits(16)
@@ -273,6 +374,7 @@ class _PCMATalkSender:
         self.voice_packets_sent = 0
         self.silence_packets_sent = 0
         self.underrun_silence_packets = 0
+        self.keepalive_packets_sent = 0
         self.dropped_frames = 0
 
     @property
@@ -331,10 +433,12 @@ class _PCMATalkSender:
     async def _loop(self) -> None:
         loop = asyncio.get_running_loop()
         next_at = loop.time()
+        idle_ticks = 0
         while not self._stop.is_set():
-            payload = _PCMA_SILENCE_20MS
-            marker = False
             if self.talking:
+                idle_ticks = 0
+                payload = _PCMA_SILENCE_20MS
+                marker = False
                 if self._queued_pcma:
                     payload = self._queued_pcma.popleft()
                     marker = self._marker_next
@@ -343,10 +447,18 @@ class _PCMATalkSender:
                 else:
                     self.underrun_silence_packets += 1
                     self.silence_packets_sent += 1
+                self._send_pcma(payload, marker=marker)
             else:
-                self.silence_packets_sent += 1
+                # Muted: send no audio, only an empty RTP packet once per
+                # second so the gateway keeps the audio leg open. The
+                # timestamp keeps running so voice resumes on the right clock.
+                if idle_ticks % self.keepalive_ticks == 0:
+                    self._send_keepalive()
+                idle_ticks += 1
+                self.timestamp = (
+                    self.timestamp + self.samples_per_packet
+                ) & 0xFFFFFFFF
 
-            self._send_pcma(payload, marker=marker)
             next_at += self.interval
             sleep_for = next_at - loop.time()
             if sleep_for > 0:
@@ -357,6 +469,21 @@ class _PCMATalkSender:
                     pass
             else:
                 next_at = loop.time()
+
+    def _send_keepalive(self) -> None:
+        header = struct.pack(
+            "!BBHII",
+            0x80,
+            self.payload_type & 0x7F,
+            self.seq & 0xFFFF,
+            self.timestamp & 0xFFFFFFFF,
+            self.ssrc & 0xFFFFFFFF,
+        )
+        self.transport.sendto(header, self.dest)
+        self.packets_sent += 1
+        self.keepalive_packets_sent += 1
+        self.bytes_sent += len(header)
+        self.seq = (self.seq + 1) & 0xFFFF
 
     def _send_pcma(self, payload: bytes, *, marker: bool = False) -> None:
         header = struct.pack(
@@ -388,6 +515,7 @@ class _PCMATalkSender:
             "voice_packets": self.voice_packets_sent,
             "silence_packets": self.silence_packets_sent,
             "underrun_packets": self.underrun_silence_packets,
+            "keepalive_packets": self.keepalive_packets_sent,
             "dropped_frames": self.dropped_frames,
             "queue_frames": len(self._queued_pcma),
             "payload_type": self.payload_type,
@@ -449,6 +577,9 @@ class _RTPProtocol(asyncio.DatagramProtocol):
         self.rtcp_dropped = 0
         self.invalid_rtp_dropped = 0
         self.missing_crypto_dropped = 0
+        self.lost_packets = 0
+        self.video_resolution: tuple[int, int, int, int] | None = None
+        self.rtcp_types: dict[str, int] = {}
 
     def connection_made(self, transport: asyncio.DatagramTransport) -> None:
         self.transport = transport
@@ -461,6 +592,13 @@ class _RTPProtocol(asyncio.DatagramProtocol):
         # H.264/PCMA RTP.
         if len(data) >= 2 and 192 <= data[1] <= 223:
             self.rtcp_dropped += 1
+            kind = f"{data[1]}/{data[0] & 0x1F}"
+            self.rtcp_types[kind] = self.rtcp_types.get(kind, 0) + 1
+            if self.rtcp_types[kind] <= 2:
+                _LOGGER.info(
+                    "[abb] media: %s RTCP from station pt=%d fmt=%d len=%d",
+                    self.label, data[1], data[0] & 0x1F, len(data),
+                )
             return
 
         self.packets += 1
@@ -468,7 +606,12 @@ class _RTPProtocol(asyncio.DatagramProtocol):
         if len(data) >= 12:
             pt = data[1] & 0x7F
             self.payload_types[pt] = self.payload_types.get(pt, 0) + 1
-            self.last_seq = struct.unpack_from("!H", data, 2)[0]
+            seq = struct.unpack_from("!H", data, 2)[0]
+            if self.packets > 1:
+                gap = (seq - self.last_seq) & 0xFFFF
+                if 1 < gap < 0x8000:
+                    self.lost_packets += gap - 1
+            self.last_seq = seq
             if self.media_ssrc == 0:
                 self.media_ssrc = struct.unpack_from("!I", data, 8)[0]
 
@@ -518,6 +661,9 @@ class _RTPProtocol(asyncio.DatagramProtocol):
                         nal_type if nal_type is not None else "-",
                     )
 
+            if self.label == "video":
+                self._note_video_resolution(data)
+
             if self._rewrite_pt is not None and pt != self._rewrite_pt:
                 marker = data[1] & 0x80
                 data = (
@@ -535,6 +681,20 @@ class _RTPProtocol(asyncio.DatagramProtocol):
             self._on_packet(data)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("on_packet handler raised: %s", err)
+
+    def _note_video_resolution(self, data: bytes) -> None:
+        sps = _h264_sps_from_rtp_payload(_rtp_payload(data) or b"")
+        if sps is None:
+            return
+        info = _parse_h264_sps(sps)
+        if info is None or info == self.video_resolution:
+            return
+        self.video_resolution = info
+        profile, level, width, height = info
+        _LOGGER.info(
+            "[abb] media: video SPS resolution=%dx%d profile=%d level=%.1f",
+            width, height, profile, level / 10,
+        )
 
     def error_received(self, exc: Exception) -> None:
         _LOGGER.debug("RTP datagram error: %s", exc)
@@ -722,11 +882,11 @@ class StreamSession:
         for m in call.answer.medias:
             _LOGGER.info(
                 "[abb] media: %s SDP answer camera_index=%s media=%s ip=%s "
-                "port=%d pts=%s rtpmap=%s direction=%s",
+                "port=%d pts=%s rtpmap=%s fmtp=%s direction=%s",
                 self._door.name,
                 self._camera_index if self._camera_index is not None else "default",
                 m.media, m.connection_ip, m.port,
-                m.payload_types, m.rtpmap, m.direction,
+                m.payload_types, m.rtpmap, m.fmtp, m.direction,
             )
             if m.media == "audio" and m.connection_ip and m.port:
                 self._audio_crypto_key = _parse_abb_media_key(m.crypto)
@@ -839,11 +999,14 @@ class StreamSession:
             )
 
         if self._audio_transport is not None and self._endpoints.audio is not None:
+            # The SDP key is the station's own send key, and our offer/answer
+            # carries no a=crypto line, so the station expects plain PCMA.
+            # Encrypting the uplink with that key made the station play the
+            # ECB ciphertext of idle silence as a loud buzz on stream start.
             self._talk_sender = _PCMATalkSender(
                 self._audio_transport,
                 self._endpoints.audio,
                 payload_type=self._remote_audio_pt,
-                encrypt_key=self._audio_crypto_key,
             )
             await self._talk_sender.start()
             _LOGGER.info(
@@ -1198,21 +1361,29 @@ class StreamSession:
                 pass
 
     async def _stats_loop(self) -> None:
+        interval = 10.0
+        last_video_bytes = 0
         while not self._stop.is_set():
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=10.0)
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
                 return
             except asyncio.TimeoutError:
                 pass
             vp = self._video_proto
             ap = self._audio_proto
+            video_bytes = vp.bytes_received if vp else 0
+            video_kbps = (video_bytes - last_video_bytes) * 8 / interval / 1000
+            last_video_bytes = video_bytes
             _LOGGER.info(
-                "[abb] media stats %s camera_index=%s: video pkts=%d pts=%s "
+                "[abb] media stats %s camera_index=%s: video pkts=%d "
+                "kbps=%.0f lost=%d pts=%s "
                 "rewrites=%d decrypt_ok=%d decrypt_failed=%d rtcp_dropped=%d "
                 "audio pkts=%d audio_decrypt_ok=%d audio_decrypt_failed=%d",
                 self._door.name,
                 self._camera_index if self._camera_index is not None else "default",
                 vp.packets if vp else 0,
+                video_kbps,
+                vp.lost_packets if vp else 0,
                 dict(vp.payload_types) if vp else {},
                 vp._rewrites if vp else 0,
                 vp.decrypt_ok if vp else 0,

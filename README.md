@@ -204,12 +204,12 @@ are mainly intended for the Scrypted plugin.
 - `abb_welcome.talk_tone`
 
 The audio format for `talk_pcm16le` is base64-encoded 8 kHz mono signed 16-bit
-little-endian PCM. HA converts it to continuous PCMA/G.711 A-law RTP on the
-active call's audio leg. Idle talkback sends silence continuously, and voice
-frames are queued into the same RTP sequence. When the SIP media SDP provides
-an ABB 16-byte AES key, talkback uses the same ABB RTP media envelope as
-incoming traffic (a 2-byte plaintext-length field plus AES-ECB ciphertext).
-Without a negotiated key, the legacy unencrypted RTP path is preserved.
+little-endian PCM. HA converts it to PCMA/G.711 A-law RTP on the active call's
+audio leg. The microphone starts muted: until `talk_start`, no audio is sent,
+only an empty RTP keepalive once per second to hold the audio leg open.
+Talkback is always sent as plain PCMA: the ABB AES key in the station's SDP
+only applies to the station's own media, and encrypting the uplink with it
+makes the outdoor station play a loud buzz. Incoming ABB AES media is decrypted with that key.
 Encrypted incoming audio without a usable SDP key is discarded with a warning,
 rather than passed to go2rtc as noise.
 
@@ -251,8 +251,8 @@ uses that event to refresh its station list and RTSP URLs.
   `station_id`.
 - `abb_welcome.talk_start` - start sending queued microphone audio on the active
   stream.
-- `abb_welcome.talk_stop` - stop voice audio and return the talkback leg to
-  silence.
+- `abb_welcome.talk_stop` - stop voice audio and mute the talkback leg
+  again.
 - `abb_welcome.talk_pcm16le` - queue base64 PCM16LE microphone audio.
 - `abb_welcome.talk_tone` - send a short generated tone for testing.
 - `abb_welcome.export_credentials` - export stored SIP/gateway credentials to a
