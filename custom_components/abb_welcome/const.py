@@ -26,6 +26,8 @@ SIP_PORT = 5060
 SIP_PORT_TLS = 5061
 
 DATA_PORTAL_STATE = "portal_state"
+# hass.data key: entry_id -> summary of every gateway getdevicelist entry.
+DATA_GATEWAY_DEVICES = f"{DOMAIN}_gateway_devices"
 
 EVENT_DISCOVERY_CHANGED = f"{DOMAIN}_discovery_changed"
 

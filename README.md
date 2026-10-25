@@ -324,6 +324,10 @@ works with **Fast**, you can leave it there for the lowest-latency setup.
   open the camera within the armed window.
 - **Camera has video but no audio**: confirm you are on a current version and
   that the stream includes the PCMA/G.711 audio track.
+- **Other ABB devices (lights, actuators, ...) are missing**: only outdoor
+  stations are supported so far. The config-entry diagnostics list every device
+  the gateway admin reports under `gateway_devices` (names of app/user entries
+  redacted); attach that list to a feature request.
 - **Apple Home / Scrypted issues**: see the
   [ABB HA Doorbell Scrypted plugin documentation](https://github.com/rankjie/abb-ha-doorbell)
   for HomeKit setup and troubleshooting.

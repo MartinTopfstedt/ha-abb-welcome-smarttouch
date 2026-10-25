@@ -7,7 +7,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DATA_GATEWAY_DEVICES, DOMAIN
 
 REDACT = "**REDACTED**"
 
@@ -75,4 +75,9 @@ async def async_get_config_entry_diagnostics(
         },
         "options": options,
         "coordinator": coordinator_info,
+        # Every device the gateway admin list reports; only outdoor stations
+        # are used today. Empty for SmartTouch entries without admin access.
+        "gateway_devices": hass.data.get(DATA_GATEWAY_DEVICES, {}).get(
+            entry.entry_id, []
+        ),
     }
