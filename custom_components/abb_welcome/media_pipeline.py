@@ -264,6 +264,7 @@ class _PCMATalkSender:
         self.talking = False
         self._marker_next = False
         self._pcm_buffer = bytearray()
+        self._pcma_buffer = bytearray()
         self._queued_pcma: deque[bytes] = deque()
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -304,6 +305,7 @@ class _PCMATalkSender:
         self.talking = False
         self._marker_next = False
         self._pcm_buffer.clear()
+        self._pcma_buffer.clear()
         self._queued_pcma.clear()
 
     async def drain(self, timeout: float = 1.0) -> None:
@@ -321,6 +323,22 @@ class _PCMATalkSender:
             frame = bytes(self._pcm_buffer[:frame_bytes])
             del self._pcm_buffer[:frame_bytes]
             self._queued_pcma.append(_encode_pcm16le_to_pcma(frame))
+            self.frames_received += 1
+            queued += 1
+            while len(self._queued_pcma) > self.max_queue_frames:
+                self._queued_pcma.popleft()
+                self.dropped_frames += 1
+        return queued
+
+    def feed_pcma(self, pcma: bytes) -> int:
+        """Queue already-encoded A-law audio, re-framed to 20 ms packets."""
+        if not self.talking:
+            return 0
+        self._pcma_buffer.extend(pcma)
+        queued = 0
+        while len(self._pcma_buffer) >= self.samples_per_packet:
+            self._queued_pcma.append(bytes(self._pcma_buffer[: self.samples_per_packet]))
+            del self._pcma_buffer[: self.samples_per_packet]
             self.frames_received += 1
             queued += 1
             while len(self._queued_pcma) > self.max_queue_frames:
@@ -1093,6 +1111,12 @@ class StreamSession:
         stats = sender.stats()
         stats["queued_frames_now"] = queued
         return stats
+
+    def feed_talkback_pcma(self, pcma: bytes) -> int:
+        sender = self._talk_sender
+        if sender is None or not sender.active:
+            raise RuntimeError("talkback is not ready; open the camera stream first")
+        return sender.feed_pcma(pcma)
 
     async def send_talkback_tone(
         self,

@@ -216,6 +216,22 @@ rather than passed to go2rtc as noise.
 Scrypted assigns a per-client `talkback_session_id` so stale clients cannot stop
 or overwrite a newer microphone session.
 
+### Two-way audio through go2rtc
+
+Each camera also offers an ONVIF-style audio backchannel to Home Assistant's
+go2rtc. go2rtc requests it automatically, so any go2rtc client that can send
+microphone audio talks to the door station without Scrypted, for example the
+[WebRTC Camera](https://github.com/AlexxIT/WebRTC) card with its microphone
+enabled, or go2rtc's own web UI.
+
+- The backchannel accepts PCMA/G.711 A-law, which browsers offer over WebRTC
+  without transcoding. Other codecs are ignored with a warning.
+- Talkback starts with the first microphone packet and stops one second after
+  the packets stop (microphone muted or closed).
+- A client already talking through the `talk_*` services keeps priority.
+- Streaming must be armed as usual; the backchannel only works while the
+  camera stream is open.
+
 ## Scrypted RTSP Endpoint
 
 Scrypted needs a LAN-reachable RTSP URL. HA's bundled go2rtc RTSP listener is
