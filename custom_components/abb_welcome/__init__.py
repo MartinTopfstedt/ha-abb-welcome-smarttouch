@@ -46,6 +46,7 @@ from .streaming_state import (
     RING_ARM_SECONDS,
     arm,
     disarm,
+    get_state,
     is_pickup_allowed,
     set_pickup_allowed,
 )
@@ -550,6 +551,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 SERVICE_EXPORT_CREDENTIALS = "export_credentials"
 SERVICE_REFRESH_DOORS = "refresh_doors"
 SERVICE_ARM_STREAMING = "arm_streaming"
+SERVICE_REJECT_CALL = "reject_call"
 SERVICE_TALK_START = "talk_start"
 SERVICE_TALK_STOP = "talk_stop"
 SERVICE_TALK_PCM16LE = "talk_pcm16le"
@@ -974,6 +976,49 @@ def _async_register_services(hass: HomeAssistant) -> None:
                     vol.Optional("duration"): vol.All(
                         vol.Coerce(float), vol.Range(min=5, max=600)
                     ),
+                }
+            ),
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_REJECT_CALL):
+
+        async def _reject_call(call: ServiceCall) -> None:
+            target_entry_id = call.data.get("entry_id")
+            station_id = str(call.data.get("station_id") or "").strip()
+            entries = hass.data.get(DOMAIN, {})
+            if not entries:
+                raise HomeAssistantError("No ABB Welcome config entries are loaded")
+            if target_entry_id:
+                if target_entry_id not in entries:
+                    raise HomeAssistantError(
+                        f"No ABB Welcome config entry id={target_entry_id!r}"
+                    )
+                entry_ids = [target_entry_id]
+            else:
+                entry_ids = list(entries.keys())
+            rejected = 0
+            for eid in entry_ids:
+                listener = entries[eid].get("sip_listener")
+                if listener is None:
+                    continue
+                if await listener.reject_pending_call(station_id) is None:
+                    continue
+                rejected += 1
+                # The ring auto-armed streaming for this call; nothing is
+                # left to pick up, so close that window again.
+                if get_state(hass, eid).reason == ARM_REASON_RING:
+                    disarm(hass, eid)
+            if not rejected:
+                raise HomeAssistantError("No ringing ABB Welcome call to reject")
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_REJECT_CALL,
+            _reject_call,
+            schema=vol.Schema(
+                {
+                    vol.Optional("entry_id"): str,
+                    vol.Optional("station_id"): str,
                 }
             ),
         )
