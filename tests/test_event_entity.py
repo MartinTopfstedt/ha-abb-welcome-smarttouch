@@ -75,11 +75,12 @@ def _load_event_module():
         "homeassistant": types.ModuleType("homeassistant"),
         "homeassistant.components": types.ModuleType("homeassistant.components"),
         "homeassistant.components.event": types.SimpleNamespace(
-            EventEntity=_FakeEventEntity
+            EventEntity=_FakeEventEntity,
+            EventDeviceClass=types.SimpleNamespace(DOORBELL="doorbell"),
         ),
         "homeassistant.config_entries": types.SimpleNamespace(ConfigEntry=object),
         "homeassistant.core": types.SimpleNamespace(
-            HomeAssistant=object, callback=lambda f: f
+            Event=object, HomeAssistant=object, callback=lambda f: f
         ),
         "homeassistant.helpers": types.ModuleType("homeassistant.helpers"),
         "homeassistant.helpers.device_registry": types.SimpleNamespace(
@@ -89,7 +90,9 @@ def _load_event_module():
             AddEntitiesCallback=object
         ),
         pkg: types.ModuleType(pkg),
-        f"{pkg}.const": types.SimpleNamespace(DOMAIN="abb_welcome"),
+        f"{pkg}.const": types.SimpleNamespace(
+            DOMAIN="abb_welcome", EVENT_RING="abb_welcome_ring"
+        ),
         f"{pkg}.coordinator": types.SimpleNamespace(
             ABBWelcomeCoordinator=object, ABBWelcomeData=_Data
         ),
