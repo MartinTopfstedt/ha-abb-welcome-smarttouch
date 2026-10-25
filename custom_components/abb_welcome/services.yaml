@@ -68,6 +68,26 @@ arm_streaming:
           mode: box
           unit_of_measurement: s
 
+reject_call:
+  name: Reject ringing call
+  description: >-
+    Decline a ringing doorbell call (SIP 603 Decline). Gateways that follow
+    SIP forking rules stop ringing the indoor stations and apps as well.
+    Streaming that the ring armed is disarmed again.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional. Specific config-entry ID. Defaults to all loaded entries.
+      required: false
+      selector:
+        text:
+    station_id:
+      name: Station ID
+      description: Optional outdoor station id to decline. Defaults to the most recent ringing call.
+      required: false
+      selector:
+        text:
+
 talk_start:
   name: Start talkback
   description: >-

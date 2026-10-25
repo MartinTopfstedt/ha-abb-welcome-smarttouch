@@ -508,6 +508,42 @@ class SipListener:
         accepted.ack_received = dialog.ack_received
         return accepted
 
+    async def reject_pending_call(self, station_id: str = "") -> str | None:
+        """Decline a ringing door-station INVITE; return its Call-ID.
+
+        Without ``station_id`` the most recent pending INVITE is declined.
+        603 Decline is a global failure, so a forking gateway should stop
+        ringing the indoor stations and apps as well.
+        """
+        async with self._dialog_lock:
+            if self._writer is None or self._writer.is_closing():
+                return None
+            station_id = str(station_id or "").strip()
+            if station_id:
+                frame = self._pop_pending_invite(station_id)
+            else:
+                frame = None
+                now = time.time()
+                for call_id, pending in list(self._open_invites.items()):
+                    if now - self._invite_received_at(pending) > 45:
+                        self._open_invites.pop(call_id, None)
+                    elif frame is None or self._invite_received_at(
+                        pending
+                    ) >= self._invite_received_at(frame):
+                        frame = pending
+                if frame is not None:
+                    self._open_invites.pop(_header(frame.headers, "Call-ID"), None)
+            if frame is None:
+                return None
+            call_id = _header(frame.headers, "Call-ID")
+            await self._respond(self._writer, frame, 603, "Decline", with_to_tag=True)
+            _LOGGER.info(
+                "[abb] Declined incoming call station=%s call_id=%s",
+                self._frame_station_id(frame),
+                call_id,
+            )
+            return call_id
+
     async def wait_accepted_call_end(self, call_id: str) -> str:
         """Wait until an accepted incoming call ends; return the end reason."""
         dialog = self._accepted_dialogs.get(call_id)

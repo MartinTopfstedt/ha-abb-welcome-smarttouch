@@ -274,6 +274,9 @@ uses that event to refresh its station list and RTSP URLs.
   CGI and reload the entry if the list changed.
 - `abb_welcome.arm_streaming` - arm streaming for all stations or one
   `station_id`.
+- `abb_welcome.reject_call` - decline a ringing doorbell call (SIP 603
+  Decline), optionally for one `station_id`. Gateways that follow SIP forking
+  rules stop ringing everywhere; ring-armed streaming is disarmed again.
 - `abb_welcome.talk_start` - start sending queued microphone audio on the active
   stream.
 - `abb_welcome.talk_stop` - stop voice audio and mute the talkback leg
