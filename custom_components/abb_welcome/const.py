@@ -29,6 +29,10 @@ DATA_PORTAL_STATE = "portal_state"
 
 EVENT_DISCOVERY_CHANGED = f"{DOMAIN}_discovery_changed"
 
+# Bus event fired on every incoming SIP INVITE.  Carries the caller URI,
+# extracted user portion (typically the outdoor station id), and call_id.
+EVENT_RING = f"{DOMAIN}_ring"
+
 GO2RTC_RTSP_HOST = "127.0.0.1"
 GO2RTC_RTSP_PORT = 18554
 

@@ -132,6 +132,28 @@ For installation, configuration and troubleshooting, see:
 
 **[ABB HA Doorbell Scrypted plugin →](https://github.com/rankjie/abb-ha-doorbell)**
 
+### Without Scrypted: HomeKit Bridge
+
+For video plus ring notifications (no talkback), Home Assistant's own HomeKit
+Bridge is enough. Expose the camera in its own accessory-mode bridge and set
+the station's doorbell event entity as the linked doorbell sensor:
+
+```yaml
+homekit:
+  - name: ABB Doorbell
+    mode: accessory
+    filter:
+      include_entities:
+        - camera.abb_welcome_gateway_tur
+    entity_config:
+      camera.abb_welcome_gateway_tur:
+        linked_doorbell_sensor: event.abb_welcome_gateway_tur_doorbell
+```
+
+The same can be set in the HomeKit Bridge options UI. Apple Home only shows
+live video while `switch.<gateway>_streaming_enabled` is on, which happens
+automatically for a ringing station while pickup is allowed.
+
 ## Entities
 
 The integration creates one HA device for the gateway.
@@ -140,6 +162,9 @@ For each unlock-capable outdoor station:
 
 - `button.<gateway>_<door_name>` - unlocks that station.
 - `camera.<gateway>_<door_name>` - live intercom stream for that station.
+- `event.<gateway>_<door_name>_doorbell` - doorbell event (device class
+  `doorbell`) that fires `ring` as soon as the SIP listener sees that station
+  ring. Only created when the realtime SIP listener is configured.
 
 Gateway-level entities:
 

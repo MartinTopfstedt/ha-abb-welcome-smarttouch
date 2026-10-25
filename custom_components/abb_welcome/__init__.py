@@ -31,6 +31,7 @@ from .const import (
     DEFAULT_UNLOCK_STRATEGY,
     DOMAIN,
     EVENT_DISCOVERY_CHANGED,
+    EVENT_RING,
     GO2RTC_RTSP_HOST,
     GO2RTC_RTSP_PORT,
     SIP_PORT_TLS,
@@ -174,10 +175,6 @@ POLL_INTERVAL = timedelta(seconds=30)
 PRESERVED_DOOR_METADATA_KEYS = ("type", "can_unlock")
 _CAMERA_COUNT_MESSAGE_RE = re.compile(r"(?:^|[\s;,])c:(\d+)(?:$|[\s;,])")
 _SIP_URI_USER_RE = re.compile(r"sip:([^@;>]+)")
-
-# Bus event fired on every incoming SIP INVITE.  Carries the caller URI,
-# extracted user portion (typically the outdoor station id), and call_id.
-EVENT_RING = f"{DOMAIN}_ring"
 
 # Bus event fired for every SIP frame the listener sends or receives.
 # Useful for protocol investigation / debugging — subscribe in an

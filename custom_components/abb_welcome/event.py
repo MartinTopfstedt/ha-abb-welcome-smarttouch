@@ -1,20 +1,24 @@
-"""Event entity for ABB Welcome intercom events.
+"""Event entities for ABB Welcome intercom events.
 
-Fires HA events when the gateway reports rings, door opens, calls, etc.
-These show up in the HA logbook and can trigger automations.
+* ``Intercom`` fires HA events when the portal reports rings, door opens,
+  calls, etc.  These show up in the HA logbook and can trigger automations.
+* One ``<door> Doorbell`` entity per outdoor station fires ``ring`` the
+  moment the realtime SIP listener sees that station's INVITE.  It carries
+  the doorbell device class, so HomeKit Bridge can link it to the camera
+  and announce rings.
 """
 
 from __future__ import annotations
 
 import logging
 
-from homeassistant.components.event import EventEntity
+from homeassistant.components.event import EventDeviceClass, EventEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, EVENT_RING
 from .coordinator import ABBWelcomeCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,19 +39,66 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up ABB Welcome event entity from a config entry."""
+    """Set up ABB Welcome event entities from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
-    coordinator: ABBWelcomeCoordinator = data.get("coordinator")
-    if not coordinator or not coordinator.has_certs:
-        return
     gateway_uuid = entry.data.get("gateway_uuid", "unknown")
-    async_add_entities([
-        ABBWelcomeEventEntity(
-            coordinator,
-            gateway_uuid,
-            entry.data.get("doors", []) or [],
+    doors = entry.data.get("doors", []) or []
+    entities: list[EventEntity] = []
+
+    coordinator: ABBWelcomeCoordinator = data.get("coordinator")
+    if coordinator and coordinator.has_certs:
+        entities.append(ABBWelcomeEventEntity(coordinator, gateway_uuid, doors))
+
+    # Doorbell entities depend on the realtime SIP listener for rings.
+    if "sip_listener" in data:
+        for door in doors:
+            station_id = str(door.get("station_id", "")).strip()
+            if station_id:
+                entities.append(
+                    ABBWelcomeDoorbellEvent(
+                        gateway_uuid,
+                        station_id,
+                        str(door.get("name") or station_id),
+                    )
+                )
+
+    async_add_entities(entities)
+
+
+def _gateway_device_info(gateway_uuid: str) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, gateway_uuid)},
+        name="ABB Welcome Gateway",
+        manufacturer="ABB / Busch-Jaeger",
+        model="IP Gateway (MRANGE)",
+    )
+
+
+class ABBWelcomeDoorbellEvent(EventEntity):
+    """Doorbell press for one outdoor station, from the realtime SIP ring."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:doorbell"
+    _attr_device_class = EventDeviceClass.DOORBELL
+    _attr_event_types = ["ring"]
+
+    def __init__(self, gateway_uuid: str, station_id: str, door_name: str) -> None:
+        self._station_id = station_id
+        self._attr_name = f"{door_name} Doorbell"
+        self._attr_unique_id = f"{gateway_uuid}_doorbell_{station_id}"
+        self._attr_device_info = _gateway_device_info(gateway_uuid)
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            self.hass.bus.async_listen(EVENT_RING, self._handle_ring)
         )
-    ])
+
+    @callback
+    def _handle_ring(self, event: Event) -> None:
+        if str(event.data.get("station_id", "")).strip() != self._station_id:
+            return
+        self._trigger_event("ring", dict(event.data))
+        self.async_write_ha_state()
 
 
 class ABBWelcomeEventEntity(EventEntity):
@@ -73,12 +124,7 @@ class ABBWelcomeEventEntity(EventEntity):
             if str(door.get("station_id", "")).strip()
         }
         self._attr_unique_id = f"{gateway_uuid}_intercom_events"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, gateway_uuid)},
-            name="ABB Welcome Gateway",
-            manufacturer="ABB / Busch-Jaeger",
-            model="IP Gateway (MRANGE)",
-        )
+        self._attr_device_info = _gateway_device_info(gateway_uuid)
         self._last_seen_id = ""
 
     async def async_added_to_hass(self) -> None:
