@@ -1,0 +1,191 @@
+# ABB Welcome – Dashboard
+#
+# Einfügen: Einstellungen → Dashboards → Dashboard hinzufügen → "Neu von Grund auf"
+# → Dashboard öffnen → ⋮ → Bearbeiten → ⋮ → Raw-Konfigurationseditor → alles ersetzen.
+#
+# Entity-IDs prüfen (Einstellungen → Geräte → "ABB Welcome Gateway") und bei Bedarf
+# per Suchen/Ersetzen anpassen:
+#   camera.abb_welcome_gateway_tur                     Kamera der Tür-Station
+#   image.abb_welcome_gateway_latest_screenshot        letztes Gateway-Foto
+#   switch.abb_welcome_gateway_streaming_enabled       Streaming freigeben (180 s)
+#   switch.abb_welcome_gateway_allow_pickup            Klingel-Anrufe annehmen
+#   button.abb_welcome_gateway_tur                     Tür öffnen
+#   button.abb_welcome_gateway_refresh_events          Ereignisse neu laden
+#   binary_sensor.abb_welcome_gateway_intercom_ringing klingelt gerade
+#   event.abb_welcome_gateway_intercom                 Klingel-Ereignisse
+#   sensor.abb_welcome_gateway_last_event              letztes Ereignis
+#   sensor.abb_welcome_gateway_sip_listener            Verbindung zum Gateway
+#
+# Zusätzlich nötig: Helfer input_boolean.haustur_live und die Automation aus
+# haustuer_live_automation.yaml. Das Live-Bild erscheint nur, wenn dieser
+# Helfer an ist – sonst würde ein offenes Dashboard jeden Klingelanruf
+# automatisch annehmen (der Stream nimmt einen klingelnden Anruf an).
+
+title: Haustür
+views:
+  - title: Haustür
+    path: haustuer
+    icon: mdi:doorbell-video
+    type: sections
+    max_columns: 2
+    sections:
+      # ------------------------------------------------------------------
+      # Bild / Live-Video
+      # ------------------------------------------------------------------
+      - type: grid
+        cards:
+          - type: heading
+            heading: Haustür
+            icon: mdi:doorbell-video
+            badges:
+              - type: entity
+                entity: binary_sensor.abb_welcome_gateway_intercom_ringing
+                show_state: true
+                show_icon: true
+                color: red
+                visibility:
+                  - condition: state
+                    entity: binary_sensor.abb_welcome_gateway_intercom_ringing
+                    state: "on"
+              - type: entity
+                entity: switch.abb_welcome_gateway_streaming_enabled
+                show_state: true
+                show_icon: true
+                color: green
+                visibility:
+                  - condition: state
+                    entity: switch.abb_welcome_gateway_streaming_enabled
+                    state: "on"
+
+          # Es klingelt: großer Annehmen-Button
+          - type: tile
+            entity: input_boolean.haustur_live
+            name: Es klingelt – Anruf annehmen
+            icon: mdi:phone-ring
+            color: red
+            tap_action:
+              action: perform-action
+              perform_action: input_boolean.turn_on
+              target:
+                entity_id: input_boolean.haustur_live
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: binary_sensor.abb_welcome_gateway_intercom_ringing
+                state: "on"
+              - condition: state
+                entity: input_boolean.haustur_live
+                state_not: "on"
+
+          # Nicht live: letztes Foto, Tippen startet Live-Bild
+          - type: picture-entity
+            entity: image.abb_welcome_gateway_latest_screenshot
+            name: Tippen für Live-Bild
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: input_boolean.turn_on
+              target:
+                entity_id: input_boolean.haustur_live
+            hold_action:
+              action: more-info
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_boolean.haustur_live
+                state_not: "on"
+
+          # Live (nimmt einen klingelnden Anruf an). Tippen öffnet die
+          # Detailansicht mit Ton.
+          - type: picture-entity
+            entity: camera.abb_welcome_gateway_tur
+            camera_view: live
+            show_name: false
+            show_state: false
+            tap_action:
+              action: more-info
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_boolean.haustur_live
+                state: "on"
+              - condition: state
+                entity: switch.abb_welcome_gateway_streaming_enabled
+                state: "on"
+
+          # Bedienung
+          - type: tile
+            entity: input_boolean.haustur_live
+            name: Live / Auflegen
+            icon: mdi:cctv
+            vertical: true
+            tap_action:
+              action: toggle
+            grid_options:
+              columns: 4
+          - type: tile
+            entity: button.abb_welcome_gateway_tur
+            name: Tür öffnen
+            icon: mdi:door-open
+            vertical: true
+            color: amber
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.abb_welcome_gateway_tur
+              confirmation:
+                text: Haustür wirklich öffnen?
+            grid_options:
+              columns: 4
+          - type: tile
+            entity: switch.abb_welcome_gateway_allow_pickup
+            name: Pickup erlauben
+            icon: mdi:phone-incoming
+            vertical: true
+            tap_action:
+              action: toggle
+            grid_options:
+              columns: 4
+
+      # ------------------------------------------------------------------
+      # Status & Verlauf
+      # ------------------------------------------------------------------
+      - type: grid
+        cards:
+          - type: heading
+            heading: Status
+            icon: mdi:information-outline
+          - type: entities
+            state_color: true
+            entities:
+              - entity: binary_sensor.abb_welcome_gateway_intercom_ringing
+                name: Klingelt
+              - entity: sensor.abb_welcome_gateway_last_event
+                name: Letztes Ereignis
+              - entity: switch.abb_welcome_gateway_streaming_enabled
+                name: Live freigegeben
+              - type: attribute
+                entity: switch.abb_welcome_gateway_streaming_enabled
+                attribute: remaining_seconds
+                name: Live noch
+                suffix: s
+                icon: mdi:timer-sand
+              - entity: sensor.abb_welcome_gateway_sip_listener
+                name: Gateway-Verbindung
+              - entity: button.abb_welcome_gateway_refresh_events
+                name: Ereignisse neu laden
+
+          - type: heading
+            heading: Verlauf
+            icon: mdi:history
+          - type: logbook
+            target:
+              entity_id:
+                - event.abb_welcome_gateway_intercom
+                - button.abb_welcome_gateway_tur
+                - switch.abb_welcome_gateway_streaming_enabled
+            hours_to_show: 48

@@ -1,0 +1,60 @@
+# ABB Welcome – "Haustür live" Helfer synchron halten
+#
+# Voraussetzung: Helfer anlegen
+#   Einstellungen → Geräte & Dienste → Helfer → Helfer erstellen → Schalter
+#   Name: "Haustür live"  → ergibt input_boolean.haustur_live
+#
+# Einfügen: Einstellungen → Automationen → Automation erstellen → ⋮ → In YAML
+# bearbeiten → alles ersetzen → speichern.
+#
+# Warum: Das Dashboard zeigt das Live-Bild nur, wenn dieser Helfer an ist.
+# Ein offenes Dashboard nimmt Klingelanrufe deshalb nicht von selbst an –
+# erst ein Tippen auf "Annehmen / Live" öffnet den Stream (und nimmt dabei
+# einen klingelnden Anruf an).
+
+alias: Haustür live synchronisieren
+description: Koppelt input_boolean.haustur_live an das ABB-Streaming.
+mode: queued
+triggers:
+  - trigger: state
+    entity_id: input_boolean.haustur_live
+    to: "on"
+    id: live_an
+  - trigger: state
+    entity_id: input_boolean.haustur_live
+    to: "off"
+    id: live_aus
+  - trigger: state
+    entity_id: switch.abb_welcome_gateway_streaming_enabled
+    to: "off"
+    id: streaming_aus
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: live_an
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: switch.abb_welcome_gateway_streaming_enabled
+      - conditions:
+          - condition: trigger
+            id: live_aus
+          - condition: state
+            entity_id: switch.abb_welcome_gateway_streaming_enabled
+            state: "on"
+        sequence:
+          # Auflegen: beendet Stream und Anruf
+          - action: switch.turn_off
+            target:
+              entity_id: switch.abb_welcome_gateway_streaming_enabled
+      - conditions:
+          - condition: trigger
+            id: streaming_aus
+          - condition: state
+            entity_id: input_boolean.haustur_live
+            state: "on"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.haustur_live
